@@ -1,0 +1,339 @@
+######################################################################
+#DATA MINING (MINI 4, 2018)
+#FINAL PROJECT FILE
+#JOHN REIM
+
+rm(list = ls())
+
+######################################################################
+#Loading the libraries
+
+library(caret)
+library(party)
+library(corrr)
+library(ggplot2)
+library(entropy)
+library(plyr)
+library(ROCR)
+library(corrplot)
+library(pROC)
+library(rpart)
+library(rpart.plot)
+library(vcd)
+
+######################################################################
+#Loading the datasets
+
+##Setting the directory where the input file is present
+setwd("C:/Users/bbove/Desktop/Tepper/Mini 4/Data Mining/Final Project/Data")
+
+##Loading the yelp from the "yelp.csv" file, converting unknown values to 'NA' and loadings the strings as factors
+yelp <- read.csv("business_full.csv", stringsAsFactors = TRUE, header=T, na.strings=c(""," ", "NA"))
+
+######################################################################
+#Processing and subsetting
+
+# factors to numeric
+cols = names(Filter(is.factor, yelp))
+for (col in cols) {
+  yelp[[col]] = as.numeric(yelp[[col]])
+}
+
+#Delete columns
+# todel <- names(yelp) %in% c("hours.Monday","hours.Tuesday","hours.Wednesday","hours.Thursday","hours.Friday","hours.Saturday","hours.Sunday", 
+#                             "postal_code", "city", "state", "latitude", "longitude", "neighborhood", "address",
+#                             "business_id", "name") 
+todel <- names(yelp) %in% c("hours.Monday","hours.Tuesday","hours.Wednesday","hours.Thursday","hours.Friday","hours.Saturday","hours.Sunday", 
+                            "postal_code", "city", "neighborhood", "address",
+                            "business_id", "name") 
+yelp <- yelp[!todel]
+#Select subset of data (only data with over x% completeness)
+yelp <- yelp[, -which(colMeans(is.na(yelp)) > 0.75)]
+#yelp <- yelp[, sapply(names(Filter(is.factor, yelp)), function(col) length(unique(col))) < 8]
+
+#Delete rows with NA's
+yelp <- yelp[complete.cases(yelp), ]
+
+#Round?
+#yelp$stars <- ceiling(yelp$stars)
+
+######################################################################
+# Entropy calculations
+
+#Pick variables based on entropy
+shannonEntropy<-function(x){
+  Col_ent<-entropy.empirical(table(x)/length(x), unit="log2")
+  return(Col_ent)
+}
+all_entropy<-apply(yelp,2,shannonEntropy)
+all_entropy<-sort(all_entropy, decreasing=TRUE)
+all_entropy
+
+######################################################################
+# Correlation plots
+
+zdf <- as.data.frame(as.table(cor(yelp)))
+zdf <- zdf[with(zdf, order(Freq)), ]
+corrplot(cor(yelp))
+#cor(yelp)[,c("stars")]
+
+corgraph <- yelp %>% 
+  correlate() %>% 
+  focus(stars)
+corgraph %>%
+  mutate(rowname = factor(rowname, levels = rowname[order(stars)])) %>%  # Order by correlation strength
+  ggplot(aes(x = rowname, y = stars)) +
+  geom_bar(stat = "identity") +
+  ylab("Correlation with stars") +
+  xlab("Variable") +  theme(axis.text.x=element_text(angle=90,hjust=1))
+
+yelp$stars <- as.factor(yelp$stars)
+#yelp$stars <- revalue(yelp$stars, c("1"="low", "2"="med", "3"="high"))
+#yelp$stars <- revalue(yelp$stars, c("0"="low", "0.5"="low", "1"="low", "1.5"="low", "2"="low", "2.5"="low", "3"="med", "3.5"="med","4"="high", "4.5"="high", "5"="high"))
+
+######################################################################
+# Possible subsets
+
+# yelp <- yelp[,c("attributes.GoodForMeal.lunch", "attributes.GoodForMeal.dinner",
+#                  "stars", "attributes.GoodForMeal.breakfast", "attributes.GoodForMeal.trendy")]
+
+# yelp <- yelp[,c("stars", "attributes.RestaurantsGoodForGroups",
+#                 "attributes.Alcohol", "attributes.OutdoorSeating",
+#                 "attributes.GoodForKids", "stars",
+#                 "attributes.RestaurantsTakeOut","attributes.GoodForMeal.lunch",
+#                 "stars", "attributes.BusinessAcceptsCreditCards",
+#                 "attributes.Ambience.classy", "attributes.GoodForMeal.dinner","latitude",
+#                 "longitude", "stars")]
+
+
+######################################################################
+# train-test split
+trainInd = createDataPartition(yelp$stars, # the outcome
+                               p = 0.75, # the % of the data in the training set
+                               list = FALSE) # the format of the result
+trainData = yelp[trainInd,]
+testData = yelp[-trainInd,]
+
+######################################################################
+#Decision tree 1
+set.seed(100)
+
+#setting the resampling method
+ctrlTree = trainControl(method="cv",
+                        number=5)
+
+# ctrlTree = trainControl(method="cv",
+#                         number=5,
+#                         summaryFunction=twoClassSummary,	# Use AUC to pick the best model
+#                         classProbs=TRUE)
+
+# treeFit <- train(stars ~ ., 
+#                  data = trainData, 
+#                  method = "ctree", 
+#                  trControl = ctrlTree, 
+#                  metric ="ROC",
+#                  preProcess = c("center","scale"),
+#                  tuneLength = 20)
+
+treeFit <- train(stars ~ .,
+            data=trainData,
+            method = 'ctree2',
+            trControl=ctrlTree,
+            tuneGrid=expand.grid(maxdepth=2:4,mincriterion = 0))
+
+print(treeFit)
+plot(treeFit)
+plot(treeFit$finalModel, type = "simple")
+
+#predict
+testTree = predict(treeFit, newdata = testData)
+testTreeProb = predict(treeFit, newdata=testData, type = "prob")
+
+
+confusionMatrix(data = testTree, testData$stars)
+#For binary classification
+# reeROC = roc(predictor = testTreeProb$nottrendy,
+#                response = testData$stars,
+#                levels = rev(levels(testData$stars)))
+# 
+# plot(treeROC, col = "blue")
+
+######################################################################
+#Decision Tree 2 (with photos)
+
+setwd("C:/Users/bbove/Desktop/Tepper/Mini 4/Data Mining/Final Project/Data")
+
+PhotoCaptions <- read.csv("photos_smpl.csv")
+
+#Creating a variable of the information from photocaptions that we want to include in the decision tree
+CaptionsAttributes <- PhotoCaptions[c(3,8,11,13,15,18,19,20,21,23)]
+
+#Creating a Decision Tree for the Photo Captions Data
+library(caret)
+
+set.seed(100)
+CaptionsAttributes$stars=as.factor(CaptionsAttributes$stars)
+cvtree <- train(stars~. , method= 'ctree', data=CaptionsAttributes,
+                trControl=trainControl(method = 'cv', number=5),
+                tuneGrid=expand.grid(mincriterion=0.95),
+                na.action = na.exclude)
+
+cvtree
+varImp(cvtree)
+plot(cvtree$finalModel)
+
+######################################################################
+#Decision Tree 3 (with users)
+
+setwd("C:/Users/bbove/Desktop/Tepper/Mini 4/Data Mining/Final Project/Data")
+
+Users <-read.csv("users_smpl.csv")
+
+#All data
+UsersAttributes <- Users[c(7,8,9,10,12:22)]
+
+set.seed(100)
+UsersAttributes$average_stars=as.factor(UsersAttributes$average_stars)
+cvtree <- train(average_stars~. , method= 'ctree', data=UsersAttributes,
+                trControl=trainControl(method = 'cv', number=5),
+                tuneGrid=expand.grid(mincriterion=0.95),
+                na.action = na.exclude)
+
+cvtree
+varImp(cvtree)
+plot(cvtree$finalModel)
+
+#Subset
+UsersAttributes <- Users[c(12,13,20)]
+
+set.seed(100)
+UsersAttributes$average_stars=as.factor(UsersAttributes$average_stars)
+cvtree <- train(average_stars~. , method= 'ctree', data=UsersAttributes,
+                trControl=trainControl(method = 'cv', number=5),
+                tuneGrid=expand.grid(mincriterion=0.95),
+                na.action = na.exclude)
+
+cvtree
+varImp(cvtree)
+plot(cvtree$finalModel)
+
+######################################################################
+#Regression
+
+setwd("C:/Users/bbove/Desktop/Tepper/Mini 4/Data Mining/Final Project/Data")
+
+yelp_user_smpl_1_ <-read.csv("users2_smpl.csv")
+
+lm(formula = yelp_user_smpl_1_$stars ~ yelp_user_smpl_1_$useful_y + 
+     yelp_user_smpl_1_$funny_y + yelp_user_smpl_1_$cool_y)
+
+
+######################################################################
+#NLP Attempt (Set parameters here)
+
+min    <- 20
+txt    <- "text" 
+#dummy of useful_x has a 20% kappa
+target <- "stars" #set to dummy if using one
+fname  <- "reviews_smpl.csv"
+wd     <- "C:/Users/bbove/Desktop/Tepper/Mini 4/Data Mining/Final Project/Data"
+
+######################################################################
+#Read in data
+
+setwd(wd) 
+yelp <- read.csv(fname, header=T, na.strings=c(""," ", "NA"))
+
+#set dummy here
+#yelp <- mutate(yelp, dummy = ifelse(attributes.Ambience.casual < 1, FALSE, TRUE))
+
+######################################################################
+#Preprocessing function
+
+preprocess <- function(corpus, minCount) {
+  # make everything lowercase
+  corpus <- tm_map(corpus, content_transformer(tolower), lazy = FALSE)
+  # remove whitespaces
+  corpus  <- tm_map(corpus, stripWhitespace, lazy = FALSE)
+  # remove punctuation
+  corpus <- tm_map(corpus, removePunctuation, preserve_intra_word_dashes = TRUE, lazy = FALSE)
+  # remove stop words from corpus
+  # reduce words to their stem using Porter's stemming algorithm
+  
+  corpus <- tm_map(corpus, stemDocument, lazy = FALSE)
+  
+  #corpus <- tm_map(corpus, removeWords, words=c(stopwords("english"), 'good', 'decent', 'great', 'fine', 'worst', 'best', 'horrible', 'terrible', 'amazing', 'incredible','okay', 'ok', 'bad', 'perfect'), lazy = FALSE)
+  
+  quanteda.corpus <- corpus(corpus)
+  # unigrams
+  unigrams.dfm <- dfm(quanteda.corpus, ngrams = 1, verbose = FALSE)
+  #unigrams.trim <- dfm_trim(unigrams.dfm, min_count = minCount) #old (changed due to library issue)
+  unigrams.trim <- dfm_trim(unigrams.dfm, min_termfreq = minCount)
+  #unigrams.tfidfdtm <- dfm_weight(unigrams.trim) #type = "tfidf"?
+  unigrams.tfidfdtm <- dfm_tfidf(unigrams.trim, scheme_tf = "count", scheme_df = "inverse", base = 10)
+  unigrams.dtmmat <- as.matrix(unigrams.tfidfdtm)
+  
+  bigrams.dfm <- dfm(quanteda.corpus, ngrams = 2, verbose = FALSE)
+  #bigrams.trim <- dfm_trim(bigrams.dfm, min_count = minCount) #old (changed due to library issue)
+  bigrams.trim <- dfm_trim(bigrams.dfm, min_termfreq = minCount) 
+  #bigrams.tfidfdtm <- dfm_weight(bigrams.trim) #type = "tfidf"?
+  bigrams.tfidfdtm <- dfm_tfidf(bigrams.trim, scheme_tf = "count", scheme_df = "inverse", base = 10)
+  bigrams.dtmmat <- as.matrix(bigrams.tfidfdtm)
+  
+  tfidfdtmmat <- cbind(unigrams.dtmmat, bigrams.dtmmat)
+  tfidfdtm.df <- as.data.frame(tfidfdtmmat)
+  return(tfidfdtm.df)
+}
+
+######################################################################
+#Building corpus
+
+df <- yelp %>% 
+  group_by({target}) %>% 
+  sample_frac(1) %>% 
+  dplyr::mutate(Test_set =  as.numeric((row_number() / n()) > 0.7))
+
+
+yelpcorpus <- VCorpus(VectorSource(df[[txt]]))
+dtm_full <- preprocess(yelpcorpus, min)
+#dtmfull <- df[,colSums(is.na(dtmfull))<nrow(dtmfull)]
+dtm_full[target] = as.factor(df[[target]])
+dtm_full['Test_set'] = df$Test_set
+
+dtm_train <- dtm_full %>% 
+  filter(Test_set == 0) %>% 
+  select(-Test_set)
+
+dtm_test <- dtm_full %>% 
+  filter(Test_set == 1) %>% 
+  select(-Test_set)
+
+dtm_train <- dtm_train[complete.cases(dtm_train),]
+
+######################################################################
+#Train GLM
+
+set.seed(100)
+formula <- as.formula(paste(target, ' ~ .' ))
+model_glmnet = train(formula,  
+                     data = dtm_train, 
+                     trControl = trainControl(method = "cv", number = 5),
+                     method='glmnet',
+                     na.action=na.exclude)
+
+# Important variables according to the glmnet model
+model_glmnet_imp <- varImp(model_glmnet)
+print(model_glmnet_imp)
+plot(model_glmnet_imp, top = 15, main = "GLM-Net Important features")
+
+# prediction on test data
+glmnet_pred <- predict(model_glmnet, dtm_test, type = "raw")
+print(glmnet_pred)
+
+# Error metrics
+glm_net_metrics <- confusionMatrix(glmnet_pred, dtm_test[[target]])
+print(glm_net_metrics)
+
+# Probability that an article belongs to a certain class
+glmnet_prob <- predict(model_glmnet, dtm_test, type = "prob")
+print(glmnet_prob)
